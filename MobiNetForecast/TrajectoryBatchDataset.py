@@ -2,6 +2,8 @@ import os
 import json
 import random
 from collections import defaultdict
+from typing import List, Tuple, Union, Dict
+from pathlib import Path
 import torch
 import numpy as np
 import pandas as pd
@@ -9,7 +11,24 @@ from torch.utils.data import IterableDataset
 
 
 class TrajectoryBatchDataset(IterableDataset):
-    def __init__(self, dataset_directory, dataset_type='train', delimiter=' ', validation_ratio=0.1):
+    """
+    A dataset class for handling variable-length trajectory data, used in training,
+    validation, and testing of sequence models with PyTorch.
+
+    Args:
+        dataset_directory (str): Path to the dataset directory.
+        dataset_type (str): One of 'train', 'val', or 'test' indicating the dataset split.
+        delimiter (str): Delimiter used in the trajectory sequences (default is space).
+        validation_ratio (float): Ratio of the training data used for validation.
+    """
+
+    def __init__(
+        self,
+        dataset_directory: Union[str, Path],
+        dataset_type: str = 'train',
+        delimiter: str = ' ',
+        validation_ratio: float = 0.1
+    ):
         self.dataset_directory = dataset_directory
 
         if dataset_type in ['train', 'val']:
@@ -33,11 +52,17 @@ class TrajectoryBatchDataset(IterableDataset):
         self.vocab_size = sum(1 for _ in open(
             os.path.join(dataset_directory, 'vocab.txt'), encoding='utf-8'))
 
-
         self.batches = []
         self.dataset_type = dataset_type
 
-    def create_test_batches(self, batch_size, test_prediction_length):
+    def create_test_batches(self, batch_size: int, test_prediction_length: int) -> None:
+        """
+        Organizes test data into batches of similar sequence lengths.
+
+        Args:
+            batch_size (int): Number of samples per batch.
+            test_prediction_length (int): Fixed length to which prediction sequences are padded.
+        """
         size_to_indices = defaultdict(list)
         for i, x in enumerate(self.dataX):
             size_to_indices[len(x)].append(i)
@@ -47,7 +72,24 @@ class TrajectoryBatchDataset(IterableDataset):
                 self.batches.append(batch)
         self.dataY = [np.pad(a, (0, max(0, test_prediction_length - len(a))), mode='constant') for a in self.dataY]
 
-    def create_batches(self, batch_size, observe, predict=1, shuffle=True, drop_last=False):
+    def create_batches(
+        self,
+        batch_size: int,
+        observe: Union[int, List[int]],
+        predict: Union[int, List[int]] = 1,
+        shuffle: bool = True,
+        drop_last: bool = False
+    ) -> None:
+        """
+        Prepares training/validation batches from trajectories.
+
+        Args:
+            batch_size (int): Number of samples per batch.
+            observe (Union[int, List[int]]): Length(s) of observation windows.
+            predict (Union[int, List[int]]): Length(s) of prediction windows.
+            shuffle (bool): Whether to shuffle batches.
+            drop_last (bool): Whether to drop the last batch if it's smaller than batch_size.
+        """
         if isinstance(observe, int):
             observe = [observe]
         if isinstance(predict, int):
@@ -58,14 +100,12 @@ class TrajectoryBatchDataset(IterableDataset):
                 for i in range(0, len(trajectory) - observe_length - predict[j] + 1):
                     self.dataX.append(trajectory[i:i+observe_length])
                     self.dataY.append(
-                            trajectory[i+observe_length:i+observe_length+predict[j]])
+                        trajectory[i+observe_length:i+observe_length+predict[j]])
 
-        # Group indices of same size together
         size_to_indices = defaultdict(list)
         for i, x in enumerate(self.dataX):
             size_to_indices[len(x)].append(i)
 
-        # Prepare the list of batches and shuffle it
         batches = []
         for size_indices in size_to_indices.values():
             for i in range(0, len(size_indices), batch_size):
@@ -78,38 +118,70 @@ class TrajectoryBatchDataset(IterableDataset):
 
         self.batches = batches
 
-    def get_neighbors(self):
+    def get_neighbors(self) -> Dict[int, List[int]]:
+        """
+        Loads neighbor information for each node from `neighbors.json`.
+
+        Returns:
+            Dict[int, List[int]]: A dictionary mapping each node ID to a list of its neighbors.
+        """
         with open(os.path.join(self.dataset_directory, 'neighbors.json'), encoding='utf-8') as neighbors_file:
             neighbors = json.load(neighbors_file)
             neighbors = {int(k): v + [0] for k, v in neighbors.items()}
             neighbors[0] = []
         return neighbors
 
-    def __len__(self):
+    def get_mapping(self) -> Dict[int, str]:
+        """
+        Loads the mapping from node indices to original values.
+
+        Returns:
+            Dict[int, str]: A dictionary mapping index to original value.
+        """
+        with open(os.path.join(self.dataset_directory, 'mapping.json'), encoding='utf-8') as mapping_file:
+            mapping = json.load(mapping_file)
+            mapping = {int(v): k for k, v in mapping.items()}
+        return mapping
+
+    def __len__(self) -> int:
+        """
+        Returns the number of batches.
+
+        Returns:
+            int: Number of batches.
+        """
         return len(self.batches)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> Tuple[torch.LongTensor, torch.LongTensor]:
+        """
+        Retrieves a batch by index.
+
+        Args:
+            index (int): Batch index.
+
+        Returns:
+            Tuple[torch.LongTensor, torch.LongTensor]: A tuple of input and target tensors.
+        """
         batch_indices = self.batches[index]
-        return torch.LongTensor(np.stack([self.dataX[i] for i in batch_indices])), torch.LongTensor(np.stack([self.dataY[i] for i in batch_indices]))
+        return (
+            torch.LongTensor(np.stack([self.dataX[i] for i in batch_indices])),
+            torch.LongTensor(np.stack([self.dataY[i] for i in batch_indices]))
+        )
 
     def __iter__(self):
-        # worker_info = torch.utils.data.get_worker_info()
+        """
+        Yields batches of padded tensors during iteration.
 
-        # if worker_info is None:
-        #     batches = self.batches
-        # else:
-        #     n_workers = worker_info.num_workers
-        #     n_data = len(self.batches)
-        #     chunk_size = n_data // n_workers
-
-        #     chunk_start = chunk_size * worker_info.id
-        #     batches = self.batches[chunk_start: chunk_start + chunk_size]
-        # for i in range(len(self.dataX)):
-        #     yield torch.LongTensor(self.dataX[i]), torch.LongTensor(self.dataY[i])
+        Yields:
+            Tuple[torch.LongTensor, torch.LongTensor]: A tuple of input and target tensors for each batch.
+        """
         for batch_indices in self.batches:
             max_length = max(len(self.dataY[i]) for i in batch_indices)
             padded_samples = [
                 np.pad(self.dataY[i], (0, max_length - len(self.dataY[i])), mode='constant', constant_values=0)
                 for i in batch_indices
             ]
-            yield torch.LongTensor(np.stack([self.dataX[i] for i in batch_indices])), torch.LongTensor(np.stack(padded_samples))
+            yield (
+                torch.LongTensor(np.stack([self.dataX[i] for i in batch_indices])),
+                torch.LongTensor(np.stack(padded_samples))
+            )

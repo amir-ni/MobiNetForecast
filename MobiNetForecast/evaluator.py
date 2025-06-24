@@ -2,9 +2,10 @@ import os
 import time
 import warnings
 import itertools
-from typing import Dict, List, Optional
 from logging import Logger
+from typing import Dict, List, Optional
 from tqdm import tqdm
+import requests
 import torch
 import pandas as pd
 from nltk.translate.bleu_score import sentence_bleu
@@ -331,7 +332,6 @@ def evaluate_collision_prediction(
 
     SECONDS_PER_DAY = 24 * 60 * 60
 
-
     def add_day_column(df):
         df["day"] = (
             df["time"].astype(int)
@@ -424,3 +424,38 @@ def evaluate_collision_prediction(
 
     logger.info(", ".join([f"{key}: {value}" for key, value in results_dict.items()]))
     return results_dict
+
+
+def map_match(
+    points: list,
+    radius: int = 50
+):
+    """
+    Map match the GPS points using OSRM's Map Matching API.
+    Args:
+        points: List of tuples (lon, lat) for GPS points.
+    Returns:
+        List of tuples (lon, lat) for map-matched GPS points.
+    """
+    OSRM_BASE_URL = "http://router.project-osrm.org"
+    coords = ';'.join([f"{lon},{lat}" for lon, lat in points])
+    radiuses = ';'.join([str(radius)] * len(points))
+    url = f"{OSRM_BASE_URL}/match/v1/driving/{coords}?geometries=geojson&radiuses={radiuses}"
+    response = requests.get(url, timeout=10)
+
+    if response.status_code == 200:
+        data = response.json()
+        if 'matchings' in data and len(data['matchings']) > 0:
+            matched_points = [(pt[0], pt[1]) for pt in data['matchings'][0]['geometry']['coordinates']]
+            return matched_points
+        else:
+            print("No match found for the trajectory.")
+            return points
+    else:
+        print(f"OSRM API error code: {response.status_code}")
+        try:
+            data = response.json()
+            print(f"OSRM API error message: {data['message']}")
+        except Exception as e:
+            self.logger.error(f"No OSRM API error message found: {e}")
+        return points
